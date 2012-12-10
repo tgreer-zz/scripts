@@ -1,0 +1,50 @@
+#!/usr/bin/perl
+# We check and do all of the work pre-killacct and let cPanel's killacct do the rest normally.
+# There won't be a userdir (homedir) by the time killacct does it, but that's okay & expected.
+use warnings;
+use strict;
+
+# Grab user dir and rm -rf if the homedir exists.
+# If not, bail. If it does, chattr -iaR after rm -rf'ing.
+# If chattr'ed then check if it still exists and then rm -rf again (after chattr -iaR is done).
+
+# Get user arg/field and check what makes sense.
+my %OPTS = @ARGV;
+my $user = '';
+$user = $OPTS{'user'};
+$user =~ s/\s+//g if $user;
+chomp $user if $user;
+
+# Weird, no username passed.
+die "ERROR: No username argument supplied to script!\n" if !$user;
+
+# Ensure it's \w+, so it's a-z, 0-9 (also accepts _) of one or more characters, starting with [a-z] (at least 2 chars total).
+# No need to worry about meta chars this way, too.
+die "ERROR: Syntax in $user is invalid!\n" if ($user !~ /^[a-z]\w+$/); # username's can't start with a number and must be 2+ chars long.
+
+# If it looks okay, check /etc/passwd for user's homedir.
+my $homedir = '';
+
+open(my $passwd, '<', '/etc/passwd')	or die "Can't open /etc/passwd $!\n";
+flock($passwd, 1)			or warn "Can't get shared lock on /etc/passwd\n";
+while (<$passwd>) {
+	my ($userpwd, $chkhome) = (split(/:/))[0,5];
+	if ($userpwd eq $user) {
+		$homedir = $chkhome if ($chkhome =~ m#^/home[0-9]?/\w+$#);
+		last;
+	}
+}
+close($passwd)				or warn "Can't close file handler for passwd $!\n";
+
+# If homedir found, rm -rf (done in steps)
+if (-d $homedir) {
+	die "WARN: $homedir is a symlink to somewhere else. Bailing to be safe.\n" if (-l $homedir);
+	system("rm -rf $homedir"); # See if we can remove it/clear files.
+	if (-d $homedir) { # If $homedir still exists, we chattr -iaR with less files, and then rm -rf again.
+		system("chattr -iaR $homedir; rm -rf $homedir");
+	}
+	if (-d $homedir) { # If after we rm -rf, chattr -iaR and rm -rf again and it still exists, may be partition is r/o, or?
+		die "ERROR: Something strange happened. Can't seem to remove $homedir! Partition might be ro, or parent dir immutable?\n";
+	}
+} # Otherwise no homedir found, do nothing to do.
+
